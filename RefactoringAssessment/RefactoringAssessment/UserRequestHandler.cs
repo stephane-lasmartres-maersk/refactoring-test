@@ -1,6 +1,7 @@
 ﻿using Azure.Messaging.EventHubs;
 using Azure.Messaging.EventHubs.Producer;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Options;
 using Newtonsoft.Json;
 using System;
 using System.Text;
@@ -9,24 +10,20 @@ namespace RefactoringAssessment
 {
     public class UserRequestHandler
     {
-        private UserRequestDbContext _context;
-        private EventHubProducerClient _producerClient;
+        private string _dbConnectionString;
+        private string _eventHubConnectionString;
+        private string _eventHubName;
 
         public UserRequestHandler(string dbConnectString, string eventHubConnectionString, string eventHubName)
         {
-            var options = new DbContextOptionsBuilder<UserRequestDbContext>()
-                .UseSqlServer(dbConnectString)
-                .Options;
-
-            _context = new UserRequestDbContext(options);
-
-            _producerClient = new EventHubProducerClient(eventHubConnectionString, eventHubName);
-
+            _dbConnectionString = dbConnectString;
+            _eventHubConnectionString = eventHubConnectionString;
+            _eventHubName = eventHubName;
         }
 
         public async void Handle(UserRequest userRequest)
         {
-            // 1- validate user input
+            // 1- validate
             if (userRequest == null)
             {
                 throw new ArgumentNullException(nameof(userRequest));
@@ -34,23 +31,46 @@ namespace RefactoringAssessment
 
             if (string.IsNullOrWhiteSpace(userRequest.UserName))
             {
-                throw new ArgumentNullException(nameof(userRequest.UserName));
+                ArgumentNullException.ThrowIfNullOrEmpty(userRequest.UserName);
             }
 
             if (userRequest.Data is null)
             {
-                throw new ArgumentNullException(nameof(userRequest.Data));
+                ArgumentNullException.ThrowIfNull(userRequest.Data);
             }
 
-            // 2- store to database
-            _context.Add(userRequest);
-            _context.SaveChanges();
+            // 2 - process
+            if(userRequest.UserType == UserType.Basic)
+            {
+                ProcessStandardUser();
+            } 
+            else if(userRequest.UserType == UserType.Premium)
+            {
+                ProcessPremiumUser();
+            }
+            else if (userRequest.UserType == UserType.Admin)
+            {
+                ProcessAdminUser();
+            }
+            else
+            {
+                throw new NotImplementedException();
+            }
+
+            // 3 - persist
+            var options = new DbContextOptionsBuilder<UserRequestDbContext>()
+                .UseSqlServer(_dbConnectionString)
+                .Options;
+            var context = new UserRequestDbContext(options);
+            context.Add(userRequest);
+            context.SaveChanges();
 
 
-            // 3- produce outbound event
+            // 4- produce outbound event
             var stringMessage = JsonConvert.SerializeObject(userRequest);
 
-            using (EventDataBatch eventBatch = await _producerClient.CreateBatchAsync())
+            var producerClient = new EventHubProducerClient(_eventHubConnectionString, _eventHubName);
+            using (EventDataBatch eventBatch = await producerClient.CreateBatchAsync())
             {
                 if (!eventBatch.TryAdd(new EventData(Encoding.UTF8.GetBytes(stringMessage))))
                 {
@@ -60,14 +80,29 @@ namespace RefactoringAssessment
                 try
                 {
                     // Use the producer client to send the batch of events to the event hub
-                    await _producerClient.SendAsync(eventBatch);
+                    await producerClient.SendAsync(eventBatch);
                     Console.WriteLine($"User request sent: {stringMessage}.");
                 }
                 finally
                 {
-                    await _producerClient.DisposeAsync();
+                    await producerClient.DisposeAsync();
                 }
             }
+        }
+
+        private void ProcessAdminUser()
+        {
+            // process admin user
+        }
+
+        private void ProcessPremiumUser()
+        {
+            // process premium user
+        }
+
+        private void ProcessStandardUser()
+        {
+            // process standard user
         }
     }
 }
